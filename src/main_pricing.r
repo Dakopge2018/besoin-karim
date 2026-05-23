@@ -1,9 +1,9 @@
 # =============================================================================
-# FICHIER PRINCIPAL 2: TARIFICATION (main_pricing.r)
-# Estime les primes d'assurance en fonction des différentes probabilités de persistance
+# MAIN FILE 2: PRICING (main_pricing.r)
+# Estimates insurance premiums based on different persistence probabilities
 # =============================================================================
 
-# === INITIALISATION ===
+# === INITIALIZATION ===
 source("./src/const.r")
 source("./src/utilities.r")
 
@@ -12,21 +12,71 @@ theme_set(theme_bw())
 
 cat("\n")
 cat(paste(rep("=", 70), collapse = ""), "\n")
-cat("PROGRAMME PRINCIPAL 2: TARIFICATION D'ASSURANCE VIE\n")
+cat("MAIN PROGRAM 2: LIFE INSURANCE PRICING\n")
 cat(paste(rep("=", 70), collapse = ""), "\n\n")
 
-# === SOUS-FONCTION: Créer le modèle de tarification ===
+# === INTERACTIVE QUESTIONS ===
+
+ask_model_selection <- function() {
+  "
+  Asks user which HMM model to use
+  Returns: list with model_type and temp_variable
+  "
+  cat("\n")
+  cat(paste(rep("=", 70), collapse = ""), "\n")
+  cat("HMM MODEL SELECTION\n")
+  cat(paste(rep("=", 70), collapse = ""), "\n\n")
+  
+  cat("Please select the model to use:\n\n")
+  cat("MODEL TYPE:\n")
+  cat("  1 - Poisson-Normal (death in Poisson)\n")
+  cat("  2 - Normal-Normal (death in Normal log)\n\n")
+  
+  choice_model <- readline("Enter your choice (1 or 2): ")
+  
+  while (!choice_model %in% c("1", "2")) {
+    cat("❌ Invalid choice. Please enter 1 or 2.\n")
+    choice_model <- readline("Enter your choice (1 or 2): ")
+  }
+  
+  model_type <- ifelse(choice_model == "1", "poisson_normal", "normal_normal")
+  
+  cat("\nTEMPERATURE VARIABLE:\n")
+  cat("  1 - Normal temperature (temp_norm)\n")
+  cat("  2 - Extreme temperature (temp_extreme)\n\n")
+  
+  choice_temp <- readline("Enter your choice (1 or 2): ")
+  
+  while (!choice_temp %in% c("1", "2")) {
+    cat("❌ Invalid choice. Please enter 1 or 2.\n")
+    choice_temp <- readline("Enter your choice (1 or 2): ")
+  }
+  
+  temp_variable <- ifelse(choice_temp == "1", "temp_norm", "temp_extreme")
+  
+  cat(sprintf("\n✓ Model selected: %s + %s\n\n", model_type, temp_variable))
+  
+  return(list(
+    model_type = model_type,
+    temp_variable = temp_variable
+  ))
+}
+
+# Get model selection
+model_selection <- ask_model_selection()
+
+# === HELPER FUNCTION: Create pricing model ===
 
 main_init_pricing_model <- function(hmm_model, n_states) {
   "
-  Fonction auxiliaire: Initialise le moteur de tarification
-  Appelée depuis le main() avec les modèles HMM ajustés
+  Helper function: Initializes the pricing engine
+  Called from main() with fitted HMM models
   "
   
-  cat("\n🔧 Initialisation du modèle de tarification\n")
+  cat("\n🔧 Initializing pricing model\n")
   cat(paste(rep("-", 70), collapse = ""), "\n")
   
-  # Créer l'environnement privé
+  # Create private environment
   env <- new.env()
   env$hmm_model <- hmm_model
   env$n_states <- n_states
@@ -34,13 +84,13 @@ main_init_pricing_model <- function(hmm_model, n_states) {
   env$age_labels <- CONST$PRICING$age_labels
   env$age_breaks <- CONST$PRICING$age_breaks
   env$coef_matrix <- NULL
-  env$xi_H <- diag(1, n_states)  # Identité par défaut
+  env$xi_H <- diag(1, n_states)  # Identity by default
   env$homo <- FALSE
   
-  cat(sprintf("✓ Modèle initialisé avec %d états\n", n_states))
-  cat(sprintf("✓ Taux sans risque: %.2f%%\n", CONST$PRICING$risk_free_rate * 100))
+  cat(sprintf("✓ Model initialized with %d states\n", n_states))
+  cat(sprintf("✓ Risk-free rate: %.2f%%\n", CONST$PRICING$risk_free_rate * 100))
   
-  # === PRÉ-CALCUL DES COEFFICIENTS ===
+  # === PRE-COMPUTING COEFFICIENTS ===
   
   initialize_coefficients <- function() {
     env$coef_matrix <- precompute_mortality_coefficients(
@@ -48,20 +98,20 @@ main_init_pricing_model <- function(hmm_model, n_states) {
       env$n_states, 
       env$age_labels
     )
-    cat("✓ Coefficients de mortalité pré-calculés\n")
+    cat("✓ Mortality coefficients pre-computed\n")
   }
   
   initialize_coefficients()
   
-  # === SIMULATION DES ÉTATS FUTURS ===
+  # === FUTURE STATES SIMULATION ===
   
   simulate_future_states <- function(n_periods, initial_state = 1) {
-    "Simule les états futurs avec transitions stochastiques"
+    "Simulates future states with stochastic transitions"
     states <- integer(n_periods)
     states[1] <- initial_state
     
     if (env$homo) {
-      # Mode homogène avec matrice xi_H
+      # Homogeneous mode with xi_H matrix
       trans_matrix <- env$xi_H / rowSums(env$xi_H)
       
       for (t in 2:n_periods) {
@@ -71,7 +121,7 @@ main_init_pricing_model <- function(hmm_model, n_states) {
         states[t] <- sample(1:env$n_states, 1, prob = trans_probs)
       }
     } else {
-      # Mode stochastique: transitions basées sur HMM
+      # Stochastic mode: HMM-based transitions
       for (t in 2:n_periods) {
         tryCatch({
           Q <- as.matrix(env$hmm_model$predict(what = "tpm", t = t)[,,1])
@@ -89,20 +139,20 @@ main_init_pricing_model <- function(hmm_model, n_states) {
     return(states)
   }
   
-  # === CALCUL DE LA SURVIE ===
+  # === SURVIVAL CALCULATION ===
   
   compute_survival_probability <- function(age, time_horizon, initial_state = 1L, n_steps = NULL) {
-    "Calcule la probabilité de survie intégrée sur la période"
+    "Computes integrated survival probability over the period"
     
     if (is.null(n_steps)) {
       n_steps <- max(1, round(time_horizon * 52))
     }
     dt <- time_horizon / n_steps
     
-    # Simuler les états futurs
+    # Simulate future states
     states_path <- simulate_future_states(n_steps, initial_state)
     
-    # Ages et variables temporelles
+    # Ages and temporal variables
     time_steps <- (0:(n_steps-1)) * dt
     ages_at_time <- age + time_steps
     
@@ -110,12 +160,12 @@ main_init_pricing_model <- function(hmm_model, n_states) {
     years <- 1 + total_weeks %/% 52
     weeks <- 1 + (total_weeks %% 52)
     
-    # Déterminer les groupes d'âge
+    # Determine age groups
     age_group_indices <- findInterval(ages_at_time, env$age_breaks, rightmost.closed = TRUE)
     age_group_indices <- pmax(1, pmin(age_group_indices, length(env$age_labels)))
     age_ranges <- env$age_labels[age_group_indices]
     
-    # Calculer les intensités de mortalité
+    # Compute mortality intensities
     mu_vector <- sapply(1:n_steps, function(i) {
       compute_mortality_intensity(
         age_ranges[i],
@@ -126,28 +176,28 @@ main_init_pricing_model <- function(hmm_model, n_states) {
       )
     })
     
-    # Hazard cumulé
+    # Cumulative hazard
     cumulative_hazard <- sum(mu_vector * dt)
     
-    # Probabilité de survie
+    # Survival probability
     exp(-cumulative_hazard)
   }
   
-  # === CALCUL DE PRIME CLASSIQUE ===
+  # === CLASSICAL PREMIUM CALCULATION ===
   
   calculate_premium_classical <- function(age_start,
                                          death_benefit,
                                          contract_duration,
                                          initial_state = 1L,
                                          verbose = TRUE) {
-    "Calcule la prime par méthode classique discrète annuelle"
+    "Computes premium using classical discrete annual method"
     
     n_years <- as.integer(ceiling(contract_duration))
     
     years_vec <- seq_len(n_years)
     ages_vec <- age_start + (years_vec - 1)
     
-    # Probabilités de survie année par année
+    # Survival probabilities year by year
     survival_1_year_vec <- sapply(ages_vec, function(age) {
       compute_survival_probability(
         age = age,
@@ -164,8 +214,8 @@ main_init_pricing_model <- function(hmm_model, n_states) {
     premium_total <- sum(contributions)
     
     if (verbose) {
-      cat("\n📊 CALCUL ANNÉE PAR ANNÉE:\n")
-      cat(sprintf("%6s %12s %12s %12s %15s\n", "Année", "P(Survie→t)", "P(Décès)", "Facteur D.", "Contribution"))
+      cat("\n📊 YEAR-BY-YEAR CALCULATION:\n")
+      cat(sprintf("%6s %12s %12s %12s %15s\n", "Year", "P(Survival→t)", "P(Death)", "Disc. Factor", "Contribution"))
       cat(paste(rep("-", 65), collapse = ""), "\n")
       
       for (t in seq_len(min(n_years, 10))) {
@@ -173,7 +223,7 @@ main_init_pricing_model <- function(hmm_model, n_states) {
                     t, survival_probs_to_t[t], death_probs[t], discount_factors[t], contributions[t]))
       }
       
-      if (n_years > 10) cat("   ... (années suivantes masquées)\n")
+      if (n_years > 10) cat("   ... (following years hidden)\n")
       cat(paste(rep("-", 65), collapse = ""), "\n")
       cat(sprintf("%6s %12s %12s %12s %15.2f\n", "TOTAL", "", "", "", premium_total))
     }
@@ -192,7 +242,7 @@ main_init_pricing_model <- function(hmm_model, n_states) {
     ))
   }
   
-  # === INTERFACE PUBLIQUE ===
+  # === PUBLIC INTERFACE ===
   
   return(list(
     compute_survival_probability = compute_survival_probability,
@@ -202,11 +252,11 @@ main_init_pricing_model <- function(hmm_model, n_states) {
     
     set_xi_matrix = function(xi_H, homo = FALSE) {
       if (nrow(xi_H) != env$n_states || ncol(xi_H) != env$n_states) {
-        stop(sprintf("xi_H doit être une matrice %dx%d", env$n_states, env$n_states))
+        stop(sprintf("xi_H must be a %dx%d matrix", env$n_states, env$n_states))
       }
       env$xi_H <- xi_H
       env$homo <- homo
-      cat(sprintf("✓ Matrice xi_H mise à jour\n"))
+      cat(sprintf("✓ xi_H matrix updated\n"))
     },
     
     get_info = function() list(
@@ -218,154 +268,222 @@ main_init_pricing_model <- function(hmm_model, n_states) {
   ))
 }
 
-# === SOUS-FONCTION: Analyse de sensibilité ===
+# === HELPER FUNCTION: Sensitivity analysis ===
 
 main_sensitivity_analysis <- function(pricing_model,
                                       age_start = 65,
                                       death_benefit = 100000,
                                       contract_duration = 40,
                                       initial_state = 1,
-                                      n_states = 2) {
+                                      n_states = 2,
+                                      p22_values = NULL) {
   "
-  Fonction auxiliaire: Effectue une analyse de sensibilité
-  Calcule les primes pour différentes matrices de transition
+  Helper function: Performs sensitivity analysis
+  Computes premiums for different transition matrices
+  For 3 states: generates 5 matrices for different p22 values
   "
   
-  cat("\n\n🎯 ANALYSE DE SENSIBILITÉ\n")
+  cat("\n\n🎯 SENSITIVITY ANALYSIS\n")
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
-  # Valeurs de probabilités à tester
+  # Probability values to test
   p_values <- c(0.95, 0.85, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15, 0.05)
   n_p <- length(p_values)
   
-  premium_matrix <- matrix(NA, nrow = n_p, ncol = n_p)
-  rownames(premium_matrix) <- p_values
-  colnames(premium_matrix) <- p_values
+  # For 3 states: test with 5 p22 values
+  if (n_states == 3 && is.null(p22_values)) {
+    p22_values <- c(0.95, 0.75, 0.5, 0.25, 0.05)
+  }
   
-  cat(sprintf("Calcul pour %d x %d scénarios de transition...\n", n_p, n_p))
-  pb <- txtProgressBar(min = 0, max = n_p^2, style = 3)
-  counter <- 0
-  
-  for (i in 1:n_p) {
-    for (j in 1:n_p) {
-      counter <- counter + 1
-      p1 <- p_values[i]
-      p2 <- p_values[j]
-      
-      if (n_states == 2) {
-        # Matrice 2x2
+  # === 2 STATE CASE: Single matrix ===
+  if (n_states == 2) {
+    premium_matrix <- matrix(NA, nrow = n_p, ncol = n_p)
+    rownames(premium_matrix) <- p_values
+    colnames(premium_matrix) <- p_values
+    
+    cat(sprintf("Computing for %d x %d transition scenarios...\n", n_p, n_p))
+    pb <- txtProgressBar(min = 0, max = n_p^2, style = 3)
+    counter <- 0
+    
+    for (i in 1:n_p) {
+      for (j in 1:n_p) {
+        counter <- counter + 1
+        p1 <- p_values[i]
+        p2 <- p_values[j]
+        
+        # 2x2 matrix
         xi_matrix <- matrix(c(p1, 1-p1, 1-p2, p2), nrow = 2, byrow = TRUE)
-      } else if (n_states == 3) {
-        # Matrice 3x3 (exemple: fixer p22)
-        p22 <- 0.5
-        xi_matrix <- matrix(c(
-          p1, (1-p1)/2, (1-p1)/2,
-          (1-p22)/2, p22, (1-p22)/2,
-          (1-p2)/2, (1-p2)/2, p2
-        ), nrow = 3, byrow = TRUE)
+        
+        pricing_model$set_xi_matrix(xi_matrix, homo = TRUE)
+        
+        result <- pricing_model$calculate_premium(
+          age = age_start,
+          benefit = death_benefit,
+          duration = contract_duration,
+          initial_state = initial_state,
+          verbose = FALSE
+        )
+        
+        premium_matrix[i, j] <- result$premium_value / death_benefit * 1000  # Taux (pour 1000€)
+        setTxtProgressBar(pb, counter)
+      }
+    }
+    close(pb)
+    
+    cat("\n\n✓ Sensitivity analysis completed\n\n")
+    return(premium_matrix)
+  }
+  
+  # === 3 STATE CASE: 5 matrices for 5 p22 values ===
+  if (n_states == 3) {
+    matrices_list <- list()
+    
+    total_calcs <- length(p22_values) * n_p^2
+    cat(sprintf("Computing for %d p22 values x %d x %d scenarios (Total: %d calculations)...\n", 
+                length(p22_values), n_p, n_p, total_calcs))
+    pb <- txtProgressBar(min = 0, max = total_calcs, style = 3)
+    counter <- 0
+    
+    for (k in 1:length(p22_values)) {
+      p22 <- p22_values[k]
+      
+      premium_matrix <- matrix(NA, nrow = n_p, ncol = n_p)
+      rownames(premium_matrix) <- p_values
+      colnames(premium_matrix) <- p_values
+      
+      for (i in 1:n_p) {
+        for (j in 1:n_p) {
+          counter <- counter + 1
+          p1 <- p_values[i]
+          p2 <- p_values[j]
+          
+          # 3x3 matrix with variable p22
+          xi_matrix <- matrix(c(
+            p1, (1-p1)/2, (1-p1)/2,
+            (1-p22)/2, p22, (1-p22)/2,
+            (1-p2)/2, (1-p2)/2, p2
+          ), nrow = 3, byrow = TRUE)
+          
+          pricing_model$set_xi_matrix(xi_matrix, homo = TRUE)
+          
+          result <- pricing_model$calculate_premium(
+            age = age_start,
+            benefit = death_benefit,
+            duration = contract_duration,
+            initial_state = initial_state,
+            verbose = FALSE
+          )
+          
+          premium_matrix[i, j] <- result$premium_value / death_benefit * 1000  # Rate (per 1000€)
+          setTxtProgressBar(pb, counter)
+        }
       }
       
-      pricing_model$set_xi_matrix(xi_matrix, homo = TRUE)
-      
-      result <- pricing_model$calculate_premium(
-        age_start = age_start,
-        death_benefit = death_benefit,
-        contract_duration = contract_duration,
-        initial_state = initial_state,
-        verbose = FALSE
-      )
-      
-      premium_matrix[i, j] <- result$premium_value / death_benefit * 1000  # Taux (pour 1000€)
-      setTxtProgressBar(pb, counter)
+      # Store matrix with descriptive name
+      matrix_name <- sprintf("p22_%.2f", p22)
+      matrices_list[[matrix_name]] <- premium_matrix
     }
+    close(pb)
+    
+    cat("\n\n✓ Sensitivity analysis completed\n")
+    cat(sprintf("✓ 5 matrices generated for p22 = c(%.2f, %.2f, %.2f, %.2f, %.2f)\n\n", 
+                p22_values[1], p22_values[2], p22_values[3], p22_values[4], p22_values[5]))
+    
+    return(matrices_list)
   }
-  close(pb)
-  
-  cat("\n\n✓ Analyse de sensibilité terminée\n\n")
-  
-  return(premium_matrix)
 }
 
-# === FONCTION PRINCIPALE: Tarification complète ===
+# === MAIN FUNCTION: Complete pricing ===
 
 main <- function() {
   "
-  Fonction principale:
-  1. Charge les modèles HMM ajustés
-  2. Initialise les moteurs de tarification
-  3. Calcule les primes pour différents scénarios
-  4. Effectue des analyses de sensibilité
-  5. Génère rapports et visualisations
+  Main function:
+  1. Loads fitted HMM models
+  2. Initializes pricing engines
+  3. Computes premiums for different scenarios
+  4. Performs sensitivity analyses
+  5. Generates reports and visualizations
   "
   
-  # === ÉTAPE 1: CHARGER LES MODÈLES ===
+  # === STEP 1: LOAD MODELS ===
   
-  cat("\n📊 ÉTAPE 1: CHARGEMENT DES MODÈLES HMM\n")
+  cat("\n📊 STEP 1: LOADING HMM MODELS\n")
   cat(paste(rep("-", 70), collapse = ""), "\n")
   
-  # Vérifier que les modèles existent
-  if (!file.exists("./models/hmm_model_2states.rds")) {
-    cat("❌ Erreur: Modèle 2 états non trouvé\n")
-    cat("   Exécutez d'abord main_model_comparison.r\n")
+  # Create model suffix
+  model_suffix <- paste0(
+    model_selection$model_type, "_",
+    model_selection$temp_variable
+  )
+  
+  file_model_2states <- sprintf("./models/hmm_model_2states_%s.rds", model_suffix)
+  file_model_3states <- sprintf("./models/hmm_model_3states_%s.rds", model_suffix)
+  
+  # Check that models exist
+  if (!file.exists(file_model_2states)) {
+    cat(sprintf("❌ Error: 2-state model not found\n", file_model_2states))
+    cat(sprintf("   Expected file: %s\n", file_model_2states))
+    cat("   Please run main_model_comparison.r first with the same configuration\n")
     return(invisible(NULL))
   }
   
-  hmm_2states <- readRDS("./models/hmm_model_2states.rds")
-  cat("✓ Modèle 2 états chargé\n")
+  hmm_2states <- readRDS(file_model_2states)
+  cat(sprintf("✓ 2-state model loaded: %s\n", file_model_2states))
   
-  if (file.exists("./models/hmm_model_3states.rds")) {
-    hmm_3states <- readRDS("./models/hmm_model_3states.rds")
-    cat("✓ Modèle 3 états chargé\n")
+  if (file.exists(file_model_3states)) {
+    hmm_3states <- readRDS(file_model_3states)
+    cat(sprintf("✓ 3-state model loaded: %s\n", file_model_3states))
   } else {
+    cat(sprintf("⚠️  3-state model not found: %s\n", file_model_3states))
     hmm_3states <- NULL
   }
   
-  # === ÉTAPE 2: INITIALISER LES MODÈLES DE TARIFICATION ===
+  # === STEP 2: INITIALIZE PRICING ENGINES ===
   
   cat("\n\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
-  cat("📊 ÉTAPE 2: INITIALISATION DES MOTEURS DE TARIFICATION\n")
+  cat("📊 STEP 2: INITIALIZING PRICING ENGINES\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
   
   pricing_2states <- main_init_pricing_model(hmm_2states, 2)
-  cat("✓ Moteur de tarification 2 états initialisé\n")
+  cat("✓ 2-state pricing engine initialized\n")
   
   if (!is.null(hmm_3states)) {
     pricing_3states <- main_init_pricing_model(hmm_3states, 3)
-    cat("✓ Moteur de tarification 3 états initialisé\n")
+    cat("✓ 3-state pricing engine initialized\n")
   }
   
-  # === ÉTAPE 3: CALCUL DE PRIMES SIMPLES ===
+  # === STEP 3: SIMPLE PREMIUM CALCULATION ===
   
   cat("\n\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
-  cat("📊 ÉTAPE 3: CALCUL DES PRIMES (SCÉNARIOS DE BASE)\n")
+  cat("📊 STEP 3: PREMIUM CALCULATION (BASE SCENARIOS)\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
   
-  # Scénarios à tester
+  # Scenarios to test
   scenarios <- data.frame(
     age = c(65, 65, 75, 75),
     duration = c(20, 40, 15, 30),
     benefit = c(100000, 100000, 50000, 50000)
   )
   
-  cat("\n🔹 MODÈLE 2 ÉTATS\n")
+  cat("\n🔹 2-STATE MODEL\n")
   results_2 <- list()
   
   for (i in 1:nrow(scenarios)) {
-    cat(sprintf("\n  Scénario %d: Âge %d, Durée %d ans, Capital %s€\n",
+    cat(sprintf("\n  Scenario %d: Age %d, Duration %d years, Benefit %s€\n",
                 i, scenarios$age[i], scenarios$duration[i], 
                 format(scenarios$benefit[i], big.mark = ",")))
     
     result <- pricing_2states$calculate_premium(
-      age_start = scenarios$age[i],
-      death_benefit = scenarios$benefit[i],
-      contract_duration = scenarios$duration[i],
+      age = scenarios$age[i],
+      benefit = scenarios$benefit[i],
+      duration = scenarios$duration[i],
       initial_state = 1,
       verbose = FALSE
     )
     
-    cat(sprintf("  → Prime: %.2f€ (Taux: %.2f‰)\n",
+    cat(sprintf("  → Premium: %.2f€ (Rate: %.2f‰)\n",
                 result$premium_value,
                 result$premium_value / scenarios$benefit[i] * 1000))
     
@@ -373,23 +491,23 @@ main <- function() {
   }
   
   if (!is.null(hmm_3states)) {
-    cat("\n\n🔹 MODÈLE 3 ÉTATS\n")
+    cat("\n\n🔹 3-STATE MODEL\n")
     results_3 <- list()
     
     for (i in 1:nrow(scenarios)) {
-      cat(sprintf("\n  Scénario %d: Âge %d, Durée %d ans, Capital %s€\n",
+      cat(sprintf("\n  Scenario %d: Age %d, Duration %d years, Benefit %s€\n",
                   i, scenarios$age[i], scenarios$duration[i], 
                   format(scenarios$benefit[i], big.mark = ",")))
       
       result <- pricing_3states$calculate_premium(
-        age_start = scenarios$age[i],
-        death_benefit = scenarios$benefit[i],
-        contract_duration = scenarios$duration[i],
+        age = scenarios$age[i],
+        benefit = scenarios$benefit[i],
+        duration = scenarios$duration[i],
         initial_state = 2,  # État "moyen"
         verbose = FALSE
       )
       
-      cat(sprintf("  → Prime: %.2f€ (Taux: %.2f‰)\n",
+      cat(sprintf("  → Premium: %.2f€ (Rate: %.2f‰)\n",
                   result$premium_value,
                   result$premium_value / scenarios$benefit[i] * 1000))
       
@@ -397,14 +515,14 @@ main <- function() {
     }
   }
   
-  # === ÉTAPE 4: ANALYSE DE SENSIBILITÉ ===
+  # === STEP 4: SENSITIVITY ANALYSES ===
   
   cat("\n\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
-  cat("📊 ÉTAPE 4: ANALYSES DE SENSIBILITÉ\n")
+  cat("📊 STEP 4: SENSITIVITY ANALYSES\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
   
-  # Pour 2 états
+  # For 2 states
   sensitivity_2 <- main_sensitivity_analysis(
     pricing_2states,
     age_start = 65,
@@ -414,12 +532,13 @@ main <- function() {
     n_states = 2
   )
   
-  cat("\n📋 Tableau de sensibilité (2 états) - Taux pour 1000€:\n")
+  cat("\n📋 Sensitivity table (2 states) - Rate per 1000€:\n")
   print(round(sensitivity_2, 4))
   
-  # Exporter la matrice
-  write.csv(sensitivity_2, "./results/sensitivity_2states.csv")
-  cat("\n✓ Résultats exportés: ./results/sensitivity_2states.csv\n")
+  # Export matrix with model suffix
+  file_sens_2 <- sprintf("./results/sensitivity_2states_%s.csv", model_suffix)
+  write.csv(sensitivity_2, file_sens_2)
+  cat(sprintf("\n✓ Results exported: %s\n", file_sens_2))
   
   if (!is.null(hmm_3states)) {
     sensitivity_3 <- main_sensitivity_analysis(
@@ -431,18 +550,27 @@ main <- function() {
       n_states = 3
     )
     
-    cat("\n📋 Tableau de sensibilité (3 états) - Taux pour 1000€:\n")
-    print(round(sensitivity_3, 4))
+    cat("\n📋 SENSITIVITY TABLES (3 STATES) - Rate per 1000€:\n")
+    cat(paste(rep("=", 70), collapse = ""), "\n\n")
     
-    write.csv(sensitivity_3, "./results/sensitivity_3states.csv")
-    cat("\n✓ Résultats exportés: ./results/sensitivity_3states.csv\n")
+    for (k in 1:length(sensitivity_3)) {
+      matrix_name <- names(sensitivity_3)[k]
+      cat(sprintf("\n🔹 %s:\n", matrix_name))
+      cat(paste(rep("-", 70), collapse = ""), "\n")
+      print(round(sensitivity_3[[k]], 4))
+      
+      # Export each matrix with model suffix
+      filename <- sprintf("./results/sensitivity_3states_%s_%s.csv", matrix_name, model_suffix)
+      write.csv(sensitivity_3[[k]], filename)
+      cat(sprintf("✓ Exported: %s\n", filename))
+    }
   }
   
-  # === ÉTAPE 5: VISUALISATIONS ===
+  # === STEP 5: VISUALIZATIONS ===
   
   cat("\n\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
-  cat("📊 ÉTAPE 5: GÉNÉRATION DES VISUALISATIONS\n")
+  cat("📊 STEP 5: GENERATING VISUALIZATIONS\n")
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
   # Heatmap sensibilité 2 états
@@ -455,29 +583,66 @@ main <- function() {
   p_heatmap2 <- ggplot(df_sens2_long, aes(x = p1, y = p2, fill = taux)) +
     geom_tile() +
     scale_fill_gradient(low = "#fee5d9", high = "#a1330d") +
-    labs(title = "Sensibilité des taux de prime (2 états)",
-         subtitle = "Âge 65, Capital 100k€, Durée 40 ans",
-         x = "Probabilité persistance État 1", 
-         y = "Probabilité persistance État 2",
-         fill = "Taux (‰)") +
+    labs(title = "Premium rate sensitivity (2 states)",
+         subtitle = "Age 65, Benefit 100k€, Duration 40 years",
+         x = "State 1 persistence probability", 
+         y = "State 2 persistence probability",
+         fill = "Rate (‰)") +
     theme_minimal()
   
   print(p_heatmap2)
-  ggsave("./results/heatmap_sensitivity_2states.pdf", width = 10, height = 8, dpi = 300)
-  cat("✓ Graphique sauvegardé: ./results/heatmap_sensitivity_2states.pdf\n")
+  pdf_name_2 <- sprintf("./results/heatmap_sensitivity_2states_%s.pdf", model_suffix)
+  ggsave(pdf_name_2, width = 10, height = 8, dpi = 300)
+  cat(sprintf("✓ Plot saved: %s\n", pdf_name_2))
   
-  # === RÉSUMÉ FINAL ===
+  # 3-state sensitivity heatmaps (5 matrices)
+  if (!is.null(hmm_3states) && exists("sensitivity_3")) {
+    cat("\n\n🔹 3-state heatmaps (5 p22 values):\n")
+    
+    for (k in 1:length(sensitivity_3)) {
+      matrix_name <- names(sensitivity_3)[k]
+      sens_matrix <- sensitivity_3[[k]]
+      
+      df_sens3 <- as.data.frame(sens_matrix)
+      df_sens3$p1 <- rownames(sens_matrix)
+      df_sens3_long <- tidyr::pivot_longer(df_sens3, -p1, names_to = "p2", values_to = "taux")
+      df_sens3_long$p1 <- as.numeric(df_sens3_long$p1)
+      df_sens3_long$p2 <- as.numeric(df_sens3_long$p2)
+      
+      p_heatmap3 <- ggplot(df_sens3_long, aes(x = p1, y = p2, fill = taux)) +
+        geom_tile() +
+        scale_fill_gradient(low = "#e8f4f8", high = "#08519c") +
+        labs(title = sprintf("Premium rate sensitivity (3 states - %s)", matrix_name),
+             subtitle = "Age 65, Benefit 100k€, Duration 40 years",
+             x = "State 1 persistence probability", 
+             y = "State 3 persistence probability",
+             fill = "Rate (‰)") +
+        theme_minimal()
+      
+      print(p_heatmap3)
+      
+      pdf_name <- sprintf("./results/heatmap_sensitivity_3states_%s_%s.pdf", matrix_name, model_suffix)
+      ggsave(pdf_name, width = 10, height = 8, dpi = 300)
+      cat(sprintf("  ✓ %s\n", pdf_name))
+    }
+  }
+  
+  # === FINAL SUMMARY ===
   
   cat("\n\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
-  cat("✅ PROGRAMME TERMINÉ AVEC SUCCÈS\n")
+  cat("✅ PROGRAM COMPLETED SUCCESSFULLY\n")
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
-  cat("📁 Fichiers générés:\n")
-  cat("  • Résultats: ./results/sensitivity_*.csv\n")
-  cat("  • Graphiques: ./results/heatmap_sensitivity_*.pdf\n\n")
+  cat("📁 Generated files:\n")
+  cat("  • 2 states: ./results/sensitivity_2states.csv + heatmap PDF\n")
+  if (!is.null(hmm_3states)) {
+    cat("  • 3 states: 5 matrices (p22=0.95, 0.75, 0.50, 0.25, 0.05)\n")
+    cat("             sensitivity_3states_p22_*.csv + heatmap PDF\n")
+  }
+  cat("\n")
   
-  cat("💡 UTILISATION:\n")
+  cat("💡 USAGE:\n")
   cat("  • pricing_2states$calculate_premium(age, benefit, duration)\n")
   cat("  • pricing_2states$set_xi_matrix(xi_H, homo=TRUE)\n\n")
   
@@ -486,14 +651,17 @@ main <- function() {
     pricing_3states = if(!is.null(hmm_3states)) pricing_3states else NULL,
     sensitivity_2 = sensitivity_2,
     sensitivity_3 = if(exists("sensitivity_3")) sensitivity_3 else NULL,
-    scenarios_results = results_2
+    scenarios_results = results_2,
+    scenarios_results_3states = if(exists("results_3")) results_3 else NULL
   )))
 }
 
-# === EXÉCUTION DU PROGRAMME ===
+# === PROGRAM EXECUTION ===
 
 results <- main()
 
-cat("💾 Résultats disponibles dans: results\n")
-cat("   • results$pricing_2states (objet de tarification)\n")
-cat("   • results$sensitivity_2 (matrice de sensibilité)\n\n")
+cat("💾 Results available in: results\n")
+cat("   • results$pricing_2states (pricing object)\n")
+cat("   • results$pricing_3states (3-state pricing object)\n")
+cat("   • results$scenarios_results (premiums 4 scenarios - 2 states)\n")
+cat("   • results$scenarios_results_3states (premiums 4 scenarios - 3 states)\n")

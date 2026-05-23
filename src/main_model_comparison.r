@@ -1,22 +1,47 @@
 # =============================================================================
-# FICHIER PRINCIPAL 1: COMPARAISON DE MODÈLES (main_model_comparison.r)
-# Estime et compare les modèles: Poisson-Normal, Normal-Normal 2 et 3 états
+# MAIN FILE 1: MODEL COMPARISON (main_model_comparison.r)
+# Estimates and compares models: Poisson-Normal, Normal-Normal 2 and 3 states
 # =============================================================================
 
-# === INITIALISATION ===
+# === INITIALIZATION ===
 source("./src/const.r")
 source("./src/utilities.r")
 
-# Initialiser l'environnement
+# Initialize environment
 initialize_environment()
 theme_set(theme_bw())
 
+# === INTERACTIVE QUESTIONS ===
 cat("\n")
 cat(paste(rep("=", 70), collapse = ""), "\n")
-cat("PROGRAMME PRINCIPAL 1: COMPARAISON DES MODÈLES HMM\n")
+cat("MAIN PROGRAM 1: HMM MODEL COMPARISON\n")
 cat(paste(rep("=", 70), collapse = ""), "\n\n")
 
-# === SOUS-FONCTION: Ajuster un modèle HMM unique ===
+# Ask the questions
+CONST$INTERACTIVE$model_type <- ask_model_type()
+CONST$INTERACTIVE$temp_variable <- ask_temp_variable()
+CONST$INTERACTIVE$plot_results <- ask_plot_results()
+
+# Set up distributions according to model type
+if (CONST$INTERACTIVE$model_type == "poisson_normal") {
+  CONST$HMM$dists <- list(
+    death = "pois"
+  )
+  CONST$HMM$dists[[CONST$INTERACTIVE$temp_variable]] <- "norm"
+  mort_dist_name <- "death"
+  cat("📊 Distributions: Poisson-Normal (mortality in Poisson)\n\n")
+} else {
+  CONST$HMM$dists <- list(
+    log_death_rate = "norm"
+  )
+  CONST$HMM$dists[[CONST$INTERACTIVE$temp_variable]] <- "norm"
+  mort_dist_name <- "log_death_rate"
+  cat("📊 Distributions: Normal-Normal (mortality in log Normal)\n\n")
+}
+
+cat(sprintf("🌡️  Temperature variable: %s\n\n", CONST$INTERACTIVE$temp_variable))
+
+# === SUB-FUNCTION: Fit a single HMM model ===
 
 main_fit_hmm_model <- function(data, 
                                nb_etats = 2, 
@@ -24,23 +49,45 @@ main_fit_hmm_model <- function(data,
                                plot_results = TRUE,
                                n_ajustements = 10) {
   "
-  Fonction auxiliaire: Ajuste un modèle HMM avec les paramètres donnés
-  Appelée depuis le main() pour chaque configuration (2 ou 3 états)
+  Helper function: Fits an HMM model with given parameters
+  Called from main() for each configuration (2 or 3 states)
   "
   
-  cat(sprintf("\n🔧 Ajustement HMM: %d états (%d tentatives)\n", nb_etats, n_ajustements))
+  cat(sprintf("\n🔧 HMM Fitting: %d states (%d attempts)\n", nb_etats, n_ajustements))
   cat(paste(rep("-", 70), collapse = ""), "\n")
   
   set.seed(CONST$DATA$seed)
   
-  # Fonction interne pour ajuster un seul modèle
+  # Internal function to fit a single model
   fit_single_model <- function(data, n_states, par_init, iteration) {
     tryCatch({
-      # Créer les objets HMM
+      # === Create formulas adapted to model type ===
+      
+      f_transition <- ~ cos_1 + sin_1
+      
+      # Observation formulas depending on model type
+      f_obs <- list()
+      
+      if (CONST$INTERACTIVE$model_type == "poisson_normal") {
+        # Poisson-Normal model: death in Poisson with offset
+        f_obs$death <- list(rate = ~ trend + sin_1 + cos_1 + offset(log_exposure))
+      } else {
+        # Normal-Normal model: log_death_rate in Normal
+        f_obs$log_death_rate <- list(mean = ~ trend + sin_1 + cos_1 + Age_factor, 
+                                      sd = ~ 1)
+      }
+      
+      # Add temperature formula
+      f_obs[[CONST$INTERACTIVE$temp_variable]] <- list(
+        mean = ~ sin_1 + cos_1 + trend,
+        sd = ~ 1
+      )
+      
+      # Create HMM objects
       hid <- hmmTMB::MarkovChain$new(
         data = data, 
         n_states = n_states, 
-        formula = CONST$FORMULAS$transition
+        formula = f_transition
       )
       
       obs <- hmmTMB::Observation$new(
@@ -48,7 +95,7 @@ main_fit_hmm_model <- function(data,
         dists = CONST$HMM$dists,
         n_states = n_states,
         par = par_init,
-        formulas = CONST$FORMULAS$observation
+        formulas = f_obs
       )
       
       # Ajuster le modèle
@@ -93,7 +140,10 @@ main_fit_hmm_model <- function(data,
     par_init <- calculer_parametres_initiaux_diversifies_simple(
       data, 
       nb_etats, 
-      iteration = i
+      iteration = i,
+      mort_var = mort_dist_name,
+      temp_var = CONST$INTERACTIVE$temp_variable,
+      mort_dist = CONST$HMM$dists[[mort_dist_name]]
     )
     
     # Ajuster le modèle
@@ -129,8 +179,23 @@ main_fit_hmm_model <- function(data,
   
   plots <- list()
   
-  if (plot_results) {
-    # 1. Convergence des critères
+  if (plot_results && CONST$INTERACTIVE$plot_results) {
+    cat("  📊 Génération des graphiques...\n")
+    
+    # Obtenir les états prédits
+    etats_predits <- modele_optimal$modele$viterbi()
+    data$etat <- etats_predits
+    
+    # Ajouter la variable temps si elle n'existe pas
+    if (!"time" %in% colnames(data)) {
+      data$time <- seq_len(nrow(data))
+    }
+    
+    # Palette de couleurs
+    etat_palette <- create_state_palette(nb_etats)
+    names(etat_palette) <- as.character(1:nb_etats)
+    
+    # 1. Graphique de convergence des critères
     resultats_ajustement <- data.frame(
       iteration = sapply(modeles_valides, function(x) x$iteration),
       aic = sapply(modeles_valides, function(x) x$aic),
@@ -140,15 +205,62 @@ main_fit_hmm_model <- function(data,
     
     if (nrow(resultats_ajustement) > 1) {
       p_convergence <- ggplot(resultats_ajustement, aes(x = iteration)) +
-        geom_line(aes(y = bic, color = "BIC"), size = 1) +
-        geom_line(aes(y = aic, color = "AIC"), size = 1) +
         geom_point(aes(y = bic, color = "BIC"), alpha = 0.6, size = 2) +
         geom_point(aes(y = aic, color = "AIC"), alpha = 0.6, size = 2) +
-        labs(title = sprintf("Critères d'information - %d états", nb_etats),
-             x = "Itération", y = "Valeur du critère", color = "Critère") +
+        labs(title = sprintf("Information criteria - %d states", nb_etats),
+             x = "Iteration", y = "Criterion value", color = "Criterion") +
         theme_minimal()
       
       plots$convergence <- p_convergence
+      print(p_convergence)
+    }
+    
+    # 2. Visualisation des données originales avec états prédits
+    p1 <- ggplot(data, aes(x = time, y = factor(etat), color = factor(etat))) +
+      geom_point(size = 3) +
+      scale_color_manual(values = etat_palette) +
+      labs(title = "Predicted hidden states (original data)", 
+           x = "Time", y = "State", color = "State") +
+      theme_minimal()
+    
+    # Graphique mortality rate / log_death_rate
+    if (CONST$INTERACTIVE$model_type == "poisson_normal") {
+      p2 <- ggplot(data, aes(x = time, y = death, color = factor(etat))) +
+        geom_point(size = 2) +
+        scale_color_manual(values = etat_palette) +
+        labs(title = "Death counts by state (original data)", 
+             x = "Time", y = "Death counts", color = "State") +
+        theme_minimal()
+    } else {
+      p2 <- ggplot(data, aes(x = time, y = log_death_rate, color = factor(etat))) +
+        geom_point(size = 2) +
+        scale_color_manual(values = etat_palette) +
+        labs(title = "Log mortality rate by state (original data)", 
+             x = "Time", y = "Log mortality rate", color = "State") +
+        theme_minimal()
+    }
+
+    # Graphique température normale
+    p3 <- ggplot(data, aes_string(x = "time", y = "temp_norm", color = "factor(etat)")) +
+      geom_point(size = 2) +
+      scale_color_manual(values = etat_palette) +
+      labs(title = "Normal temperature by state (original data)", 
+           x = "Time", y = "Temperature (°C)", color = "State") +
+      theme_minimal()  
+    
+    # Graphique température extrême
+    p4_extreme <- ggplot(data, aes_string(x = "time", y = "temp_extreme", color = "factor(etat)")) +
+      geom_point(size = 2) +
+      scale_color_manual(values = etat_palette) +
+      labs(title = "Extreme temperature by state (original data)", 
+           x = "Time", y = "Temperature (°C)", color = "State") +
+      theme_minimal()
+    
+    plots$donnees_originales <- list(p1, p2, p3, p4_extreme)
+    
+    # Affichage
+    if (length(plots$donnees_originales) > 0) {
+      print(do.call(gridExtra::grid.arrange, c(plots$donnees_originales, list(ncol = 1))))
     }
   }
   
@@ -210,6 +322,8 @@ main <- function() {
   cat(paste(rep("=", 70), collapse = ""), "\n")
   cat("📊 ÉTAPE 2: AJUSTEMENT DES MODÈLES HMM\n")
   cat(paste(rep("=", 70), collapse = ""), "\n")
+
+  dists = CONST$HMM$dists
   
   # Ajuster pour 2 états
   cat("\n\n🔹 MODÈLE À 2 ÉTATS\n")
@@ -266,13 +380,13 @@ main <- function() {
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
   # Graphique de convergence pour 2 états
-  if (!is.null(results_2states$plots$convergence)) {
+  if (!is.null(results_2states$plots$convergence) && CONST$INTERACTIVE$plot_results) {
     print(results_2states$plots$convergence)
     ggsave("./results/convergence_2states.pdf", width = 10, height = 6, dpi = 300)
   }
   
   # Graphique de convergence pour 3 états
-  if (!is.null(results_3states$plots$convergence)) {
+  if (!is.null(results_3states$plots$convergence) && CONST$INTERACTIVE$plot_results) {
     print(results_3states$plots$convergence)
     ggsave("./results/convergence_3states.pdf", width = 10, height = 6, dpi = 300)
   }
@@ -282,12 +396,14 @@ main <- function() {
     geom_bar(aes(y = aic, fill = "AIC"), stat = "identity", position = "dodge", alpha = 0.7) +
     geom_bar(aes(y = bic, fill = "BIC"), stat = "identity", position = "dodge", alpha = 0.7) +
     scale_fill_manual(values = c("AIC" = "#1f77b4", "BIC" = "#ff7f0e")) +
-    labs(title = "Comparaison des critères d'information",
-         x = "Nombre d'états", y = "Valeur du critère") +
+    labs(title = "Comparison of information criteria",
+         x = "Number of states", y = "Criterion value") +
     theme_minimal()
   
-  print(p_comparison)
-  ggsave("./results/comparison_criteria.pdf", width = 10, height = 6, dpi = 300)
+  if (CONST$INTERACTIVE$plot_results) {
+    print(p_comparison)
+    ggsave("./results/comparison_criteria.pdf", width = 10, height = 6, dpi = 300)
+  }
   
   # === ÉTAPE 5: RAPPORTS ET EXPORT ===
   
@@ -296,12 +412,21 @@ main <- function() {
   cat("📊 ÉTAPE 5: SAUVEGARDE DES RÉSULTATS\n")
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
-  # Exporter les modèles optimaux
-  saveRDS(results_2states$modele_optimal, "./models/hmm_model_2states.rds")
-  cat("✓ Modèle 2 états sauvegardé: ./models/hmm_model_2states.rds\n")
+  # Créer un suffixe descriptif incluant le type de modèle et la variable de température
+  model_suffix <- paste0(
+    CONST$INTERACTIVE$model_type, "_",
+    CONST$INTERACTIVE$temp_variable
+  )
   
-  saveRDS(results_3states$modele_optimal, "./models/hmm_model_3states.rds")
-  cat("✓ Modèle 3 états sauvegardé: ./models/hmm_model_3states.rds\n")
+  # Exporter les modèles optimaux avec noms différenciés
+  file_model_2states <- sprintf("./models/hmm_model_2states_%s.rds", model_suffix)
+  file_model_3states <- sprintf("./models/hmm_model_3states_%s.rds", model_suffix)
+  
+  saveRDS(results_2states$modele_optimal, file_model_2states)
+  cat(sprintf("✓ Modèle 2 états sauvegardé: %s\n", file_model_2states))
+  
+  saveRDS(results_3states$modele_optimal, file_model_3states)
+  cat(sprintf("✓ Modèle 3 états sauvegardé: %s\n", file_model_3states))
   
   # Exporter les résumés
   export_model_summary(results_2states, "./results/summary_2states.txt")
@@ -323,10 +448,18 @@ main <- function() {
   cat("✅ PROGRAMME TERMINÉ AVEC SUCCÈS\n")
   cat(paste(rep("=", 70), collapse = ""), "\n\n")
   
-  cat("📁 Fichiers générés:\n")
+  cat("� Configuration utilisée:\n")
+  cat(sprintf("  • Modèle: %s\n", CONST$INTERACTIVE$model_type))
+  cat(sprintf("  • Variable de température: %s\n", CONST$INTERACTIVE$temp_variable))
+  cat(sprintf("  • Graphiques: %s\n", ifelse(CONST$INTERACTIVE$plot_results, "Oui", "Non")))
+  
+  cat("\n📁 Fichiers générés:\n")
   cat("  • Modèles: ./models/hmm_model_*.rds\n")
   cat("  • Résultats: ./results/\n")
-  cat("  • Graphiques: ./results/*.pdf\n\n")
+  if (CONST$INTERACTIVE$plot_results) {
+    cat("  • Graphiques: ./results/*.pdf\n")
+  }
+  cat("\n")
   
   cat("📊 Résumé des résultats:\n")
   cat(sprintf("  • Modèle 2 états: AIC = %.2f, BIC = %.2f\n", 
@@ -355,4 +488,10 @@ results <- main()
 cat("\n💡 POUR UTILISER LES RÉSULTATS:\n")
 cat("   results_2states <- results$results_2states\n")
 cat("   results_3states <- results$results_3states\n")
-cat("   df <- results$df\n\n")
+cat("   df <- results$df\n")
+cat("   comparison <- results$comparison\n\n")
+
+cat("🔧 PARAMÈTRES UTILISÉS:\n")
+cat(sprintf("   CONST$INTERACTIVE$model_type = '%s'\n", CONST$INTERACTIVE$model_type))
+cat(sprintf("   CONST$INTERACTIVE$temp_variable = '%s'\n", CONST$INTERACTIVE$temp_variable))
+cat(sprintf("   CONST$INTERACTIVE$plot_results = %s\n\n", CONST$INTERACTIVE$plot_results))
